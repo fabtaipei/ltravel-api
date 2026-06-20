@@ -18,6 +18,9 @@ const FIELD_MASK = [
   'places.priceRange',
 ].join(',');
 
+// How many restaurants to return per city.
+const MAX_RESTAURANTS_PER_CITY = 5;
+
 export type PriceLevel =
   | 'PRICE_LEVEL_FREE'
   | 'PRICE_LEVEL_INEXPENSIVE'
@@ -78,9 +81,32 @@ function priceFromRange(range?: PriceRange): number | null {
  * Find the single top restaurant in a city via Places Text Search (New).
  * Returns null on any failure (missing key, no result, network/timeout error).
  */
-export async function getTopRestaurant(city: string): Promise<Restaurant | null> {
+/** Map one Google place to our Restaurant shape. Returns null if it has no name. */
+function placeToRestaurant(city: string, place: PlaceResult): Restaurant | null {
+  if (!place?.displayName?.text) return null;
+  const tier =
+    place.priceLevel && place.priceLevel !== 'PRICE_LEVEL_UNSPECIFIED'
+      ? PRICE_TIER[place.priceLevel]
+      : null;
+  // Prefer Google's real price range when present; fall back to the tier estimate.
+  const priceEstimateUsd = priceFromRange(place.priceRange) ?? tier?.usd ?? null;
+  return {
+    city,
+    name: place.displayName.text,
+    rating: place.rating ?? null,
+    priceSymbol: tier?.symbol ?? null,
+    priceEstimateUsd,
+    address: place.formattedAddress ?? null,
+  };
+}
+
+/** Up to `limit` top restaurants in a city (relevance order). [] on any failure. */
+export async function getRestaurantsForCity(
+  city: string,
+  limit = MAX_RESTAURANTS_PER_CITY,
+): Promise<Restaurant[]> {
   const apiKey = process.env.GOOGLE_PLACES_API_KEY;
-  if (!apiKey || !city.trim()) return null;
+  if (!apiKey || !city.trim()) return [];
 
   try {
     const res = await fetch(PLACES_TEXT_SEARCH, {
@@ -93,38 +119,23 @@ export async function getTopRestaurant(city: string): Promise<Restaurant | null>
       body: JSON.stringify({
         textQuery: `best restaurants in ${city.trim()}`,
         includedType: 'restaurant',
-        pageSize: 1, // we only want the single top pick
+        pageSize: limit,
       }),
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(6000),
     });
-    if (!res.ok) return null;
+    if (!res.ok) return [];
 
     const data = (await res.json()) as PlacesResponse;
-    const place = data.places?.[0];
-    if (!place?.displayName?.text) return null;
-
-    const tier =
-      place.priceLevel && place.priceLevel !== 'PRICE_LEVEL_UNSPECIFIED'
-        ? PRICE_TIER[place.priceLevel]
-        : null;
-
-    // Prefer Google's real price range when present; fall back to the tier estimate.
-    const priceEstimateUsd = priceFromRange(place.priceRange) ?? tier?.usd ?? null;
-
-    return {
-      city,
-      name: place.displayName.text,
-      rating: place.rating ?? null,
-      priceSymbol: tier?.symbol ?? null,
-      priceEstimateUsd,
-      address: place.formattedAddress ?? null,
-    };
+    return (data.places ?? [])
+      .map((p) => placeToRestaurant(city, p))
+      .filter((r): r is Restaurant => r !== null);
   } catch {
-    return null;
+    return [];
   }
 }
 
-/** One restaurant per city, fetched concurrently. Index aligns with `cities`. */
-export async function getTopRestaurants(cities: string[]): Promise<(Restaurant | null)[]> {
-  return Promise.all(cities.map((c) => getTopRestaurant(c)));
+/** Several restaurants per city, flattened. Each entry carries its own `city`. */
+export async function getRestaurants(cities: string[]): Promise<Restaurant[]> {
+  const perCity = await Promise.all(cities.map((c) => getRestaurantsForCity(c)));
+  return perCity.flat();
 }

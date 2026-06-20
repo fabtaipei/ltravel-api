@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 
-import { getTopRestaurants } from '@/lib/places';
+import { getRestaurants } from '@/lib/places';
 
 // Places calls are quick, but give a little headroom for several cities at once.
 export const maxDuration = 15;
@@ -38,9 +38,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const results = await getTopRestaurants(parsed.data.cities);
-    // Drop cities Google had nothing for, so the client gets only real picks.
-    const restaurants = results.filter((r) => r !== null);
+    const restaurants = await getRestaurants(parsed.data.cities);
     return json({ restaurants });
   } catch (err) {
     console.error('[restaurants] failed', err);

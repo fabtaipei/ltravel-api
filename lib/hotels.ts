@@ -24,6 +24,8 @@ const DUFFEL_VERSION = 'v2';
 // How many hotels per city to price in one rates call, and the geo fallback radius.
 const MAX_HOTELS_PER_CITY = 30;
 const GEO_RADIUS_METERS = 20000;
+// How many cheapest hotels to return per city.
+const MAX_HOTEL_RESULTS = 5;
 
 // The app is GBP-first; ask LiteAPI to quote in GBP so prices match the UI.
 const DEFAULT_CURRENCY = 'GBP';
@@ -199,62 +201,64 @@ async function getRates(
   }
 }
 
-/** Cheapest priced hotel for one city's date window. Returns null on any failure. */
-export async function getTopHotel(
+/** Up to `limit` cheapest hotels for one city's date window. [] on any failure. */
+export async function getHotelsForCity(
   city: string,
   checkInDate: string,
   checkOutDate: string,
   adults: number,
-): Promise<CityHotel | null> {
-  if (!process.env.LITEAPI_KEY || !city.trim()) return null;
+  limit = MAX_HOTEL_RESULTS,
+): Promise<CityHotel[]> {
+  if (!process.env.LITEAPI_KEY || !city.trim()) return [];
 
   const place = await resolvePlace(city);
-  if (!place) return null;
+  if (!place) return [];
 
   const hotels = await listHotels(place, city);
   // Map id → metadata (name/rating/address) — the rates response lacks these.
   const byId = new Map<string, LiteHotel>();
   for (const h of hotels) if (h.id) byId.set(h.id, h);
   const hotelIds = [...byId.keys()];
-  if (hotelIds.length === 0) return null;
+  if (hotelIds.length === 0) return [];
 
   const rates = await getRates(hotelIds, checkInDate, checkOutDate, adults);
 
-  // Cheapest offer across all hotels: min offerRetailRate.amount over roomTypes.
-  let best: { hotelId: string; amount: number; currency: string } | null = null;
+  // Cheapest offer per hotel (min offerRetailRate.amount across its roomTypes).
+  const priced: { hotelId: string; amount: number; currency: string }[] = [];
   for (const r of rates) {
     if (!r.hotelId || !r.roomTypes?.length) continue;
+    let cheapest: { amount: number; currency: string } | null = null;
     for (const rt of r.roomTypes) {
       const amount = rt.offerRetailRate?.amount;
       if (amount == null) continue;
-      if (!best || amount < best.amount) {
-        best = {
-          hotelId: r.hotelId,
-          amount,
-          currency: rt.offerRetailRate?.currency ?? DEFAULT_CURRENCY,
-        };
+      if (!cheapest || amount < cheapest.amount) {
+        cheapest = { amount, currency: rt.offerRetailRate?.currency ?? DEFAULT_CURRENCY };
       }
     }
+    if (cheapest) priced.push({ hotelId: r.hotelId, ...cheapest });
   }
-  if (!best) return null;
 
-  const meta = byId.get(best.hotelId);
   const nights = nightsBetween(checkInDate, checkOutDate);
-  const total = Math.round(best.amount);
-
-  return {
-    city,
-    name: meta?.name ?? 'Hotel',
-    rating: meta?.stars ?? null,
-    reviewScore: meta?.rating ?? null,
-    currency: best.currency,
-    totalAmount: total,
-    nights,
-    pricePerNight: Math.round(best.amount / nights),
-    address: meta?.address ?? null,
-    checkInDate,
-    checkOutDate,
-  };
+  // Cheapest hotels first; take the top `limit`.
+  return priced
+    .sort((a, b) => a.amount - b.amount)
+    .slice(0, limit)
+    .map(({ hotelId, amount, currency }) => {
+      const meta = byId.get(hotelId);
+      return {
+        city,
+        name: meta?.name ?? 'Hotel',
+        rating: meta?.stars ?? null,
+        reviewScore: meta?.rating ?? null,
+        currency,
+        totalAmount: Math.round(amount),
+        nights,
+        pricePerNight: Math.round(amount / nights),
+        address: meta?.address ?? null,
+        checkInDate,
+        checkOutDate,
+      };
+    });
 }
 
 /**
@@ -275,9 +279,9 @@ export async function getTopHotels(trip: TripData): Promise<CityHotel[]> {
     const checkInDate = addDays(trip.startDate, cumulativeNights);
     const checkOutDate = addDays(trip.startDate, cumulativeNights + nights);
     cumulativeNights += nights;
-    return getTopHotel(city.trim(), checkInDate, checkOutDate, adults);
+    return getHotelsForCity(city.trim(), checkInDate, checkOutDate, adults);
   });
 
   const results = await Promise.all(tasks);
-  return results.filter((h): h is CityHotel => h !== null);
+  return results.flat();
 }
