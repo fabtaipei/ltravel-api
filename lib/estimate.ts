@@ -24,7 +24,7 @@ import {
  * (e.g. 'anthropic/claude-sonnet-4-6' or 'anthropic/claude-opus-4-8') once you
  * have paid credits, without changing code.
  */
-const MODEL = process.env.ESTIMATE_MODEL ?? 'anthropic/claude-haiku-4-5';
+const MODEL = process.env.ESTIMATE_MODEL ?? 'anthropic/claude-sonnet-4-6';
 
 function slug(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
