@@ -1,5 +1,6 @@
 import { generateObject } from 'ai';
 
+import { buildDuffelLegs } from './duffel';
 import { getFx } from './fx';
 import { buildLegs, checkRouteEfficiency, STYLE_MULTIPLIER } from './legs';
 import { buildUserPrompt, SYSTEM_PROMPT } from './prompt';
@@ -65,10 +66,13 @@ async function generateModelEstimate(trip: TripData): Promise<ModelEstimate> {
 export async function buildEstimate(trip: TripData): Promise<TripEstimate> {
   const travellers = Math.max(1, trip.travellers);
 
-  // AI estimate and live FX run concurrently — they're independent.
-  const [model, fx] = await Promise.all([
+  // AI estimate, live FX, and real Duffel flight search run concurrently —
+  // they're independent. Duffel fails soft (returns []) so the estimate still
+  // builds if flights are unavailable.
+  const [model, fx, duffelLegs] = await Promise.all([
     generateModelEstimate(trip),
     getFx(trip.departureCity, trip.cities[0]),
+    buildDuffelLegs(trip).catch(() => []),
   ]);
 
   const cities: CityEstimate[] = model.cities.map((c) => ({
@@ -77,11 +81,16 @@ export async function buildEstimate(trip: TripData): Promise<TripEstimate> {
     costRange: cityCostRange(c.breakdown),
   }));
 
-  // Inter-city legs + route check are deterministic (heuristic placeholders;
-  // real flight/rail pricing is a roadmap item).
   const stops = [trip.departureCity.trim(), ...trip.cities].filter(Boolean);
   const styleFactor = STYLE_MULTIPLIER[trip.tripStyle];
-  const legs = buildLegs(stops, styleFactor, travellers);
+
+  // Prefer real Duffel flights when they cover every hop; otherwise fall back to
+  // the deterministic heuristic so an estimate always renders.
+  const expectedHops = stops.length - 1;
+  const legs =
+    duffelLegs.length === expectedHops && expectedHops > 0
+      ? duffelLegs
+      : buildLegs(stops, styleFactor, travellers);
   const routeWarning = checkRouteEfficiency(stops);
 
   // Cheapest available option per leg feeds the baseline trip total.
