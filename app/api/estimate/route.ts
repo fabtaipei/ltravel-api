@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { buildEstimate } from '@/lib/estimate';
+import { buildMockEstimate } from '@/lib/mockEstimate';
 import { TripDataSchema } from '@/lib/schema';
 
 // LLM calls can take a few seconds — give Vercel room (Hobby allows up to 60s).
@@ -50,8 +51,12 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // ?mock=1 returns a deterministic estimate with NO AI call — used to verify
+  // the Bilt app <-> Vercel backend connection independently of the AI Gateway.
+  const mock = req.nextUrl.searchParams.get('mock') === '1';
+
   try {
-    const estimate = await buildEstimate(parsed.data);
+    const estimate = mock ? await buildMockEstimate(parsed.data) : await buildEstimate(parsed.data);
     return json(estimate);
   } catch (err) {
     // Graceful failure — friendly JSON, no stack trace leaked to the client.
