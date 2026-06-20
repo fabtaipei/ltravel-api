@@ -21,6 +21,9 @@ export async function OPTIONS() {
 }
 
 export async function POST(req: NextRequest) {
+  // Temporary diagnostics: append ?debug=1 to surface the real upstream error.
+  const debug = req.nextUrl.searchParams.get('debug') === '1';
+
   // Optional shared secret (Bilt → Vercel hop). Off unless ESTIMATE_SHARED_SECRET is set.
   const requiredSecret = process.env.ESTIMATE_SHARED_SECRET;
   if (requiredSecret && req.headers.get('x-estimate-secret') !== requiredSecret) {
@@ -54,7 +57,11 @@ export async function POST(req: NextRequest) {
     // Graceful failure — friendly JSON, no stack trace leaked to the client.
     console.error('[estimate] failed', err);
     return json(
-      { error: 'estimate_failed', message: 'We could not build an estimate right now. Please try again.' },
+      {
+        error: 'estimate_failed',
+        message: 'We could not build an estimate right now. Please try again.',
+        ...(debug ? { detail: err instanceof Error ? err.message : String(err) } : {}),
+      },
       502,
     );
   }
