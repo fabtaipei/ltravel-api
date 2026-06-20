@@ -1,0 +1,9 @@
+{
+  "departureCity": "London",
+  "cities": ["Tokyo", "Seoul"],
+  "cityDurations": [6, 4],
+  "tripStyle": "mid-range",
+  "startDate": "2026-09-01",
+  "endDate": "2026-09-11",
+  "travellers": 2
+}
