@@ -24,9 +24,11 @@ export const TripDataSchema = z.object({
 export type TripData = z.infer<typeof TripDataSchema>;
 
 // ─── Cost primitives ─────────────────────────────────────────────────
+// Coerce so a model that returns "120" instead of 120 still validates —
+// smaller models (Haiku) sometimes emit numbers as strings.
 export const CostRangeSchema = z.object({
-  min: z.number(),
-  max: z.number(),
+  min: z.coerce.number(),
+  max: z.coerce.number(),
 });
 export type CostRange = z.infer<typeof CostRangeSchema>;
 
@@ -38,8 +40,8 @@ export const ModelTravelOptionSchema = z.object({
   mode: z.enum(['flight', 'train']),
   carrier: z.string(),
   detail: z.string(),
-  price: z.number(),
-  durationMinutes: z.number(),
+  price: z.coerce.number(),
+  durationMinutes: z.coerce.number(),
   recommended: z.boolean().optional(),
   recommendReason: z.string().optional(),
 });

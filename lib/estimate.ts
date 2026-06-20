@@ -18,12 +18,13 @@ import {
  * authed via OIDC automatically (no key); locally it uses AI_GATEWAY_API_KEY.
  * The `creator/model` string is the gateway's routing format.
  *
- * Default is Haiku because the AI Gateway FREE tier ($5/mo, no top-up) does not
- * grant access to Opus-tier models. Override with the ESTIMATE_MODEL env var
+ * Default is Haiku because it's the only model the AI Gateway FREE tier
+ * ($5/mo, no top-up) actually serves: Opus has no free access and Sonnet is
+ * rate-limited to unusable. Override with the ESTIMATE_MODEL env var
  * (e.g. 'anthropic/claude-sonnet-4-6' or 'anthropic/claude-opus-4-8') once you
  * have paid credits, without changing code.
  */
-const MODEL = process.env.ESTIMATE_MODEL ?? 'anthropic/claude-sonnet-4-6';
+const MODEL = process.env.ESTIMATE_MODEL ?? 'anthropic/claude-haiku-4-5';
 
 function slug(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
@@ -83,15 +84,32 @@ function toTripEstimate(model: ModelEstimate, fx: TripEstimate['fx']): TripEstim
  * then assemble the response. This is the single seam the Bilt app's
  * `getTripEstimate()` swaps to once it points at the deployed URL.
  */
+/** Generate the structured estimate, retrying a few times — smaller models
+ * occasionally emit output that fails schema validation, and a retry usually
+ * succeeds. */
+async function generateModelEstimate(trip: TripData): Promise<ModelEstimate> {
+  const attempts = 3;
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const { object } = await generateObject({
+        model: MODEL,
+        schema: ModelEstimateSchema,
+        system: SYSTEM_PROMPT,
+        prompt: buildUserPrompt(trip),
+      });
+      return object;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}
+
 export async function buildEstimate(trip: TripData): Promise<TripEstimate> {
   // Run the LLM estimate and live FX concurrently — they're independent.
-  const [{ object: model }, fx] = await Promise.all([
-    generateObject({
-      model: MODEL,
-      schema: ModelEstimateSchema,
-      system: SYSTEM_PROMPT,
-      prompt: buildUserPrompt(trip),
-    }),
+  const [model, fx] = await Promise.all([
+    generateModelEstimate(trip),
     getFx(trip.departureCity, trip.cities[0]),
   ]);
 
