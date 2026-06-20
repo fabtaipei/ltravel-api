@@ -1,14 +1,13 @@
 import { generateObject } from 'ai';
 
 import { getFx } from './fx';
+import { buildLegs, checkRouteEfficiency, STYLE_MULTIPLIER } from './legs';
 import { buildUserPrompt, SYSTEM_PROMPT } from './prompt';
 import {
   ModelEstimateSchema,
   type CityEstimate,
   type CostRange,
   type ModelEstimate,
-  type TravelLeg,
-  type TravelOption,
   type TripData,
   type TripEstimate,
 } from './schema';
@@ -20,18 +19,15 @@ import {
  *
  * Default is Haiku because it's the only model the AI Gateway FREE tier
  * ($5/mo, no top-up) actually serves: Opus has no free access and Sonnet is
- * rate-limited to unusable. Override with the ESTIMATE_MODEL env var
- * (e.g. 'anthropic/claude-sonnet-4-6' or 'anthropic/claude-opus-4-8') once you
- * have paid credits, without changing code.
+ * gated. The AI only produces the per-city cost numbers (a flat shape Haiku
+ * handles reliably); legs + FX are computed in code. Override with the
+ * ESTIMATE_MODEL env var (e.g. 'anthropic/claude-sonnet-4-6') once you have
+ * paid credits, without changing code.
  */
-const MODEL = process.env.ESTIMATE_MODEL ?? 'anthropic/claude-sonnet-4-6';
-
-function slug(value: string): string {
-  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
-}
+const MODEL = process.env.ESTIMATE_MODEL ?? 'anthropic/claude-haiku-4-5';
 
 /** Per-city total excludes inter-city flights (those live in `legs`), matching
- * the frontend's convention in locus/lib/tripEstimate.ts. */
+ * the frontend's convention in the Bilt app's tripEstimate.ts. */
 function cityCostRange(b: CityEstimate['breakdown']): CostRange {
   return {
     min: b.accommodation.min + b.food.min + b.activities.min,
@@ -39,54 +35,8 @@ function cityCostRange(b: CityEstimate['breakdown']): CostRange {
   };
 }
 
-/** Map the model's raw estimate into the exact `TripEstimate` shape the app
- * consumes, assigning stable ids and computing derived totals. */
-function toTripEstimate(model: ModelEstimate, fx: TripEstimate['fx']): TripEstimate {
-  const cities: CityEstimate[] = model.cities.map((c) => ({
-    name: c.name,
-    breakdown: c.breakdown,
-    costRange: cityCostRange(c.breakdown),
-  }));
-
-  const legs: TravelLeg[] = model.legs.map((leg) => {
-    const legId = `${slug(leg.from)}-${slug(leg.to)}`;
-    const options: TravelOption[] = leg.options.map((o, i) => ({
-      id: `${legId}-${o.mode}-${i}`,
-      mode: o.mode,
-      carrier: o.carrier,
-      detail: o.detail,
-      price: o.price,
-      durationMinutes: o.durationMinutes,
-      ...(o.recommended ? { recommended: true } : {}),
-      ...(o.recommendReason ? { recommendReason: o.recommendReason } : {}),
-    }));
-    // Keep the recommended option first so it stays visible before "show more".
-    options.sort((a, b) => Number(Boolean(b.recommended)) - Number(Boolean(a.recommended)));
-    return { id: legId, from: leg.from, to: leg.to, options };
-  });
-
-  // Cheapest available option per leg feeds the baseline trip total.
-  const legsTotal = legs.reduce(
-    (sum, leg) => sum + Math.min(...leg.options.map((o) => o.price)),
-    0,
-  );
-
-  const totalCost: CostRange = cities.reduce<CostRange>(
-    (acc, city) => ({ min: acc.min + city.costRange.min, max: acc.max + city.costRange.max }),
-    { min: legsTotal, max: legsTotal },
-  );
-
-  return { totalCost, cities, legs, routeWarning: model.routeWarning, fx };
-}
-
-/**
- * The estimate logic: parse/think (Claude) + pull live data (Frankfurter FX),
- * then assemble the response. This is the single seam the Bilt app's
- * `getTripEstimate()` swaps to once it points at the deployed URL.
- */
-/** Generate the structured estimate, retrying a few times — smaller models
- * occasionally emit output that fails schema validation, and a retry usually
- * succeeds. */
+/** Ask the model for the per-city breakdown, retrying a few times — small
+ * models occasionally emit output that fails schema validation. */
 async function generateModelEstimate(trip: TripData): Promise<ModelEstimate> {
   const attempts = 3;
   let lastErr: unknown;
@@ -106,12 +56,43 @@ async function generateModelEstimate(trip: TripData): Promise<ModelEstimate> {
   throw lastErr;
 }
 
+/**
+ * Build a trip estimate: AI for the per-city cost numbers, deterministic code
+ * for inter-city travel options, plus live FX. Returns the exact `TripEstimate`
+ * shape the Bilt app consumes. This is the seam the app's `getTripEstimate()`
+ * points at.
+ */
 export async function buildEstimate(trip: TripData): Promise<TripEstimate> {
-  // Run the LLM estimate and live FX concurrently — they're independent.
+  const travellers = Math.max(1, trip.travellers);
+
+  // AI estimate and live FX run concurrently — they're independent.
   const [model, fx] = await Promise.all([
     generateModelEstimate(trip),
     getFx(trip.departureCity, trip.cities[0]),
   ]);
 
-  return toTripEstimate(model, fx);
+  const cities: CityEstimate[] = model.cities.map((c) => ({
+    name: c.name,
+    breakdown: c.breakdown,
+    costRange: cityCostRange(c.breakdown),
+  }));
+
+  // Inter-city legs + route check are deterministic (heuristic placeholders;
+  // real flight/rail pricing is a roadmap item).
+  const stops = [trip.departureCity.trim(), ...trip.cities].filter(Boolean);
+  const styleFactor = STYLE_MULTIPLIER[trip.tripStyle];
+  const legs = buildLegs(stops, styleFactor, travellers);
+  const routeWarning = checkRouteEfficiency(stops);
+
+  // Cheapest available option per leg feeds the baseline trip total.
+  const legsTotal = legs.reduce(
+    (sum, leg) => sum + Math.min(...leg.options.map((o) => o.price)),
+    0,
+  );
+  const totalCost: CostRange = cities.reduce<CostRange>(
+    (acc, city) => ({ min: acc.min + city.costRange.min, max: acc.max + city.costRange.max }),
+    { min: legsTotal, max: legsTotal },
+  );
+
+  return { totalCost, cities, legs, routeWarning, fx };
 }

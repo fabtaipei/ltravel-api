@@ -62,10 +62,10 @@ export const ModelCitySchema = z.object({
   }),
 });
 
+// The AI only produces the per-city cost breakdown — a flat shape small
+// free-tier models handle reliably. Legs + routeWarning are computed in code.
 export const ModelEstimateSchema = z.object({
   cities: z.array(ModelCitySchema).min(1),
-  legs: z.array(ModelLegSchema),
-  routeWarning: z.string().nullable(),
 });
 export type ModelEstimate = z.infer<typeof ModelEstimateSchema>;
 
