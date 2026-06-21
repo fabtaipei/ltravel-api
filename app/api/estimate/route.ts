@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { buildEstimate } from '@/lib/estimate';
-import { buildMockEstimate } from '@/lib/mockEstimate';
+import { isEstimateError } from '@/lib/errors';
 import { TripDataSchema } from '@/lib/schema';
 
-// LLM calls can take a few seconds — give Vercel room (Hobby allows up to 60s).
+// LLM + flight calls can take a few seconds — give Vercel room (Hobby allows 60s).
 export const maxDuration = 30;
 
 const CORS_HEADERS = {
@@ -22,21 +22,34 @@ export async function OPTIONS() {
 }
 
 export async function POST(req: NextRequest) {
-  // Temporary diagnostics: append ?debug=1 to surface the real upstream error.
-  const debug = req.nextUrl.searchParams.get('debug') === '1';
-
   // Optional shared secret (Bilt → Vercel hop). Off unless ESTIMATE_SHARED_SECRET is set.
   const requiredSecret = process.env.ESTIMATE_SHARED_SECRET;
   if (requiredSecret && req.headers.get('x-estimate-secret') !== requiredSecret) {
-    return json({ error: 'unauthorized', message: 'Missing or invalid x-estimate-secret header.' }, 401);
+    return json(
+      {
+        error: 'unauthorized',
+        source: 'config',
+        message: 'Missing or invalid x-estimate-secret header.',
+        fix: 'Send an x-estimate-secret header matching ESTIMATE_SHARED_SECRET, or unset that env var to disable the check.',
+      },
+      401,
+    );
   }
 
-  // Parse body defensively — never throw a 500 on bad input.
+  // Parse the body — a malformed request gets a clear 400, not a 500.
   let body: unknown;
   try {
     body = await req.json();
   } catch {
-    return json({ error: 'bad_request', message: 'Request body must be valid JSON.' }, 400);
+    return json(
+      {
+        error: 'bad_request',
+        source: 'input',
+        message: 'Request body must be valid JSON.',
+        fix: 'POST a JSON body with header Content-Type: application/json.',
+      },
+      400,
+    );
   }
 
   const parsed = TripDataSchema.safeParse(body);
@@ -44,30 +57,34 @@ export async function POST(req: NextRequest) {
     return json(
       {
         error: 'invalid_trip',
+        source: 'input',
         message: 'Could not understand the trip. Check the required fields.',
+        fix: 'Fix the fields listed in `issues`. Required: departureCity, cities[≥1], tripStyle, startDate, endDate.',
         issues: parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
       },
       400,
     );
   }
 
-  // ?mock=1 returns a deterministic estimate with NO AI call — used to verify
-  // the Bilt app <-> Vercel backend connection independently of the AI Gateway.
-  const mock = req.nextUrl.searchParams.get('mock') === '1';
-
   try {
-    const estimate = mock ? await buildMockEstimate(parsed.data) : await buildEstimate(parsed.data);
+    // Real data only — buildEstimate throws an EstimateError if it can't produce it.
+    const estimate = await buildEstimate(parsed.data);
     return json(estimate);
   } catch (err) {
-    // Graceful failure — friendly JSON, no stack trace leaked to the client.
-    console.error('[estimate] failed', err);
+    if (isEstimateError(err)) {
+      console.error(`[estimate] ${err.code}: ${err.message}`, err.detail ?? '');
+      return json(err.toResponse(), err.status);
+    }
+    // Unexpected error — still tell the caller what happened.
+    console.error('[estimate] unexpected', err);
     return json(
       {
-        error: 'estimate_failed',
-        message: 'We could not build an estimate right now. Please try again.',
-        ...(debug ? { detail: err instanceof Error ? err.message : String(err) } : {}),
+        error: 'internal_error',
+        source: 'server',
+        message: err instanceof Error ? err.message : 'Unexpected server error.',
+        fix: 'This is an unexpected server error — check the API server logs for the stack trace.',
       },
-      502,
+      500,
     );
   }
 }

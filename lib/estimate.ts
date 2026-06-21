@@ -1,8 +1,8 @@
 import { generateObject } from 'ai';
 
 import { buildDuffelLegs } from './duffel';
+import { EstimateError } from './errors';
 import { getFx } from './fx';
-import { buildLegs, checkRouteEfficiency, STYLE_MULTIPLIER } from './legs';
 import { buildUserPrompt, SYSTEM_PROMPT } from './prompt';
 import {
   ModelEstimateSchema,
@@ -16,14 +16,9 @@ import {
 /**
  * Model routed through the Vercel AI Gateway. In production on Vercel this is
  * authed via OIDC automatically (no key); locally it uses AI_GATEWAY_API_KEY.
- * The `creator/model` string is the gateway's routing format.
  *
- * Default is Haiku because it's the only model the AI Gateway FREE tier
- * ($5/mo, no top-up) actually serves: Opus has no free access and Sonnet is
- * gated. The AI only produces the per-city cost numbers (a flat shape Haiku
- * handles reliably); legs + FX are computed in code. Override with the
- * ESTIMATE_MODEL env var (e.g. 'anthropic/claude-sonnet-4-6') once you have
- * paid credits, without changing code.
+ * Default is Haiku because it's the model the AI Gateway FREE tier ($5/mo)
+ * reliably serves. Override with ESTIMATE_MODEL once you have paid credits.
  */
 const MODEL = process.env.ESTIMATE_MODEL ?? 'anthropic/claude-haiku-4-5';
 
@@ -36,8 +31,12 @@ function cityCostRange(b: CityEstimate['breakdown']): CostRange {
   };
 }
 
-/** Ask the model for the per-city breakdown, retrying a few times — small
- * models occasionally emit output that fails schema validation. */
+/**
+ * Ask the model for the per-city breakdown, retrying a few times — small models
+ * occasionally emit output that fails schema validation. On exhausting retries
+ * this throws an actionable EstimateError rather than letting a raw SDK error
+ * surface (no placeholder estimate is ever substituted).
+ */
 async function generateModelEstimate(trip: TripData): Promise<ModelEstimate> {
   const attempts = 3;
   let lastErr: unknown;
@@ -54,26 +53,44 @@ async function generateModelEstimate(trip: TripData): Promise<ModelEstimate> {
       lastErr = err;
     }
   }
-  throw lastErr;
+  throw new EstimateError({
+    code: 'ai_estimate_failed',
+    source: 'ai',
+    status: 502,
+    message: `The AI cost estimate failed (model: ${MODEL}).`,
+    fix: 'Most often the AI Gateway is not authed. For local dev, set AI_GATEWAY_API_KEY in ltravel-api/.env.local (create one at Vercel → AI Gateway → API Keys). In production on Vercel, connect the AI Gateway to the project so the OIDC token is injected. You can also set ESTIMATE_MODEL to a model your plan serves.',
+    detail: lastErr instanceof Error ? lastErr.message : String(lastErr),
+  });
 }
 
 /**
- * Build a trip estimate: AI for the per-city cost numbers, deterministic code
- * for inter-city travel options, plus live FX. Returns the exact `TripEstimate`
- * shape the Bilt app consumes. This is the seam the app's `getTripEstimate()`
- * points at.
+ * Build a trip estimate from REAL data only:
+ *   - AI (Vercel AI Gateway) for the per-city cost numbers
+ *   - Duffel for live inter-city flights
+ *   - Frankfurter for live FX (additive — see below)
+ *
+ * If the AI estimate or flight search can't produce real results, this throws an
+ * EstimateError describing what's wrong and how to fix it — there is no heuristic
+ * or mock fallback. FX is the one additive exception: if ECB rates are momentarily
+ * unavailable we return `fx: null` (the conversion is simply not shown) rather
+ * than failing the whole estimate or inventing a rate.
  */
 export async function buildEstimate(trip: TripData): Promise<TripEstimate> {
-  const travellers = Math.max(1, trip.travellers);
-
-  // AI estimate, live FX, and real Duffel flight search run concurrently —
-  // they're independent. Duffel fails soft (returns []) so the estimate still
-  // builds if flights are unavailable.
-  const [model, fx, duffelLegs] = await Promise.all([
+  // Run the real data sources concurrently. allSettled so one rejection doesn't
+  // leave the others as unhandled rejections; we then surface the actionable error.
+  const [modelRes, legsRes, fxRes] = await Promise.allSettled([
     generateModelEstimate(trip),
+    buildDuffelLegs(trip),
     getFx(trip.departureCity, trip.cities[0]),
-    buildDuffelLegs(trip).catch(() => []),
   ]);
+
+  // Core data must be real — surface the first source that failed.
+  if (modelRes.status === 'rejected') throw modelRes.reason;
+  if (legsRes.status === 'rejected') throw legsRes.reason;
+
+  const model = modelRes.value;
+  const legs = legsRes.value;
+  const fx = fxRes.status === 'fulfilled' ? fxRes.value : null;
 
   const cities: CityEstimate[] = model.cities.map((c) => ({
     name: c.name,
@@ -81,27 +98,15 @@ export async function buildEstimate(trip: TripData): Promise<TripEstimate> {
     costRange: cityCostRange(c.breakdown),
   }));
 
-  const stops = [trip.departureCity.trim(), ...trip.cities].filter(Boolean);
-  const styleFactor = STYLE_MULTIPLIER[trip.tripStyle];
-
-  // Prefer real Duffel flights when they cover every hop; otherwise fall back to
-  // the deterministic heuristic so an estimate always renders.
-  const expectedHops = stops.length - 1;
-  const legs =
-    duffelLegs.length === expectedHops && expectedHops > 0
-      ? duffelLegs
-      : buildLegs(stops, styleFactor, travellers);
-  const routeWarning = checkRouteEfficiency(stops);
-
   // Cheapest available option per leg feeds the baseline trip total.
-  const legsTotal = legs.reduce(
-    (sum, leg) => sum + Math.min(...leg.options.map((o) => o.price)),
-    0,
-  );
+  const legsTotal = legs.reduce((sum, leg) => sum + Math.min(...leg.options.map((o) => o.price)), 0);
   const totalCost: CostRange = cities.reduce<CostRange>(
     (acc, city) => ({ min: acc.min + city.costRange.min, max: acc.max + city.costRange.max }),
     { min: legsTotal, max: legsTotal },
   );
 
-  return { totalCost, cities, legs, routeWarning, fx };
+  // routeWarning previously came from a heuristic over FABRICATED city positions
+  // (a name hash, not real geography), so it's disabled under the real-data-only
+  // rule. Reinstate it only if recomputed from real coordinates.
+  return { totalCost, cities, legs, routeWarning: null, fx };
 }

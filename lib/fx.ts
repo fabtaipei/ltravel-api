@@ -52,32 +52,28 @@ export async function getFx(departureCity: string, firstDestination: string): Pr
 
   const symbols = Array.from(new Set([home, destination].filter((c) => c !== BASE_CURRENCY)));
 
-  // Both home and destination are USD — nothing to fetch.
-  if (symbols.length === 0) {
-    const today = new Date().toISOString().slice(0, 10);
-    return {
-      base: BASE_CURRENCY,
-      home,
-      destination,
-      homePerBase: 1,
-      destinationPerBase: 1,
-      destinationPerHome: 1,
-      asOf: today,
-      source: 'frankfurter',
-    };
-  }
+  // Home and destination are both USD (the base): there's no conversion to show
+  // and no real rate to fetch. Return null rather than fabricate an `asOf` date
+  // or claim a 'frankfurter' source for numbers we didn't get from Frankfurter.
+  if (symbols.length === 0) return null;
 
   try {
     const url = `${FRANKFURTER_BASE}?base=${BASE_CURRENCY}&symbols=${symbols.join(',')}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.error('[estimate/fx] Frankfurter responded', res.status);
+      return null;
+    }
 
     const data = (await res.json()) as { date: string; rates: Record<string, number> };
     const rates = data.rates ?? {};
 
     const homePerBase = home === BASE_CURRENCY ? 1 : rates[home];
     const destinationPerBase = destination === BASE_CURRENCY ? 1 : rates[destination];
-    if (homePerBase == null || destinationPerBase == null) return null;
+    if (homePerBase == null || destinationPerBase == null) {
+      console.error('[estimate/fx] missing rate(s) from Frankfurter', { home, destination });
+      return null;
+    }
 
     return {
       base: BASE_CURRENCY,
@@ -89,7 +85,8 @@ export async function getFx(departureCity: string, firstDestination: string): Pr
       asOf: data.date,
       source: 'frankfurter',
     };
-  } catch {
+  } catch (err) {
+    console.error('[estimate/fx] Frankfurter fetch failed', err);
     return null;
   }
 }
