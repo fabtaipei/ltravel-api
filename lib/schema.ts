@@ -123,6 +123,14 @@ export interface TripEstimate {
   cities: CityEstimate[];
   legs: TravelLeg[];
   routeWarning: string | null;
+  /**
+   * A more efficient ordering of the SAME destination cities the user submitted
+   * (reordered, never added/removed), or null when their order is already fine.
+   * A suggestion only — the app shows it as an accept/dismiss option.
+   */
+  suggestedOrder: string[] | null;
+  /** One-line, plain reason for the suggested order, or null. */
+  suggestedOrderReason: string | null;
   /** Live home→destination FX, or null if rates were unavailable. */
   fx: FxInfo | null;
 }

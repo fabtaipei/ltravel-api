@@ -4,6 +4,7 @@ import { buildDuffelLegs } from './duffel';
 import { EstimateError } from './errors';
 import { getFx } from './fx';
 import { buildUserPrompt, SYSTEM_PROMPT } from './prompt';
+import { getRouteSuggestion } from './routeOrder';
 import {
   ModelEstimateSchema,
   type CityEstimate,
@@ -78,10 +79,11 @@ async function generateModelEstimate(trip: TripData): Promise<ModelEstimate> {
 export async function buildEstimate(trip: TripData): Promise<TripEstimate> {
   // Run the real data sources concurrently. allSettled so one rejection doesn't
   // leave the others as unhandled rejections; we then surface the actionable error.
-  const [modelRes, legsRes, fxRes] = await Promise.allSettled([
+  const [modelRes, legsRes, fxRes, routeRes] = await Promise.allSettled([
     generateModelEstimate(trip),
     buildDuffelLegs(trip),
     getFx(trip.departureCity, trip.cities[0]),
+    getRouteSuggestion(trip),
   ]);
 
   // Core data must be real — surface the first source that failed.
@@ -91,6 +93,11 @@ export async function buildEstimate(trip: TripData): Promise<TripEstimate> {
   const model = modelRes.value;
   const legs = legsRes.value;
   const fx = fxRes.status === 'fulfilled' ? fxRes.value : null;
+  // Route suggestion is additive (real coords or null) — never fails the estimate.
+  const route =
+    routeRes.status === 'fulfilled'
+      ? routeRes.value
+      : { routeWarning: null, suggestedOrder: null, suggestedOrderReason: null };
 
   const cities: CityEstimate[] = model.cities.map((c) => ({
     name: c.name,
@@ -105,8 +112,16 @@ export async function buildEstimate(trip: TripData): Promise<TripEstimate> {
     { min: legsTotal, max: legsTotal },
   );
 
-  // routeWarning previously came from a heuristic over FABRICATED city positions
-  // (a name hash, not real geography), so it's disabled under the real-data-only
-  // rule. Reinstate it only if recomputed from real coordinates.
-  return { totalCost, cities, legs, routeWarning: null, fx };
+  // routeWarning + suggestedOrder come from getRouteSuggestion, which uses REAL
+  // coordinates (Duffel Places) and returns null when the order is already fine
+  // or coordinates aren't available — never fabricated geography.
+  return {
+    totalCost,
+    cities,
+    legs,
+    routeWarning: route.routeWarning,
+    suggestedOrder: route.suggestedOrder,
+    suggestedOrderReason: route.suggestedOrderReason,
+    fx,
+  };
 }
