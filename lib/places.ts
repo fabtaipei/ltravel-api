@@ -21,6 +21,15 @@ const FIELD_MASK = [
 // How many restaurants to return per city.
 const MAX_RESTAURANTS_PER_CITY = 5;
 
+type TripStyle = 'budget' | 'mid-range' | 'luxury';
+
+// Restaurant price tier (Google priceLevels) biased by the trip style.
+const PRICE_LEVELS_BY_STYLE: Record<TripStyle, string[]> = {
+  budget: ['PRICE_LEVEL_INEXPENSIVE', 'PRICE_LEVEL_MODERATE'],
+  'mid-range': ['PRICE_LEVEL_MODERATE', 'PRICE_LEVEL_EXPENSIVE'],
+  luxury: ['PRICE_LEVEL_EXPENSIVE', 'PRICE_LEVEL_VERY_EXPENSIVE'],
+};
+
 export type PriceLevel =
   | 'PRICE_LEVEL_FREE'
   | 'PRICE_LEVEL_INEXPENSIVE'
@@ -103,6 +112,7 @@ function placeToRestaurant(city: string, place: PlaceResult): Restaurant | null 
 /** Up to `limit` top restaurants in a city (relevance order). [] on any failure. */
 export async function getRestaurantsForCity(
   city: string,
+  style: TripStyle = 'mid-range',
   limit = MAX_RESTAURANTS_PER_CITY,
 ): Promise<Restaurant[]> {
   const apiKey = process.env.GOOGLE_PLACES_API_KEY;
@@ -120,6 +130,8 @@ export async function getRestaurantsForCity(
         textQuery: `best restaurants in ${city.trim()}`,
         includedType: 'restaurant',
         pageSize: limit,
+        // Bias toward the trip's price tier so picks differ by style.
+        priceLevels: PRICE_LEVELS_BY_STYLE[style],
       }),
       signal: AbortSignal.timeout(6000),
     });
@@ -134,8 +146,11 @@ export async function getRestaurantsForCity(
   }
 }
 
-/** Several restaurants per city, flattened. Each entry carries its own `city`. */
-export async function getRestaurants(cities: string[]): Promise<Restaurant[]> {
-  const perCity = await Promise.all(cities.map((c) => getRestaurantsForCity(c)));
+/** Several restaurants per city, flattened — price tier set by trip style. */
+export async function getRestaurants(
+  cities: string[],
+  style: TripStyle = 'mid-range',
+): Promise<Restaurant[]> {
+  const perCity = await Promise.all(cities.map((c) => getRestaurantsForCity(c, style)));
   return perCity.flat();
 }

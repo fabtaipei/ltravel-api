@@ -27,6 +27,16 @@ const GEO_RADIUS_METERS = 20000;
 // How many cheapest hotels to return per city.
 const MAX_HOTEL_RESULTS = 5;
 
+type TripStyle = TripData['tripStyle'];
+
+// Minimum star rating preferred per trip style. Hotels at/above the threshold
+// come first (cheapest-first within the tier); the rest fill any remaining slots.
+const STAR_THRESHOLD_BY_STYLE: Record<TripStyle, number> = {
+  budget: 0,
+  'mid-range': 3,
+  luxury: 4,
+};
+
 // The app is GBP-first; ask LiteAPI to quote in GBP so prices match the UI.
 const DEFAULT_CURRENCY = 'GBP';
 const DEFAULT_NATIONALITY = 'GB';
@@ -207,6 +217,7 @@ export async function getHotelsForCity(
   checkInDate: string,
   checkOutDate: string,
   adults: number,
+  style: TripStyle = 'mid-range',
   limit = MAX_HOTEL_RESULTS,
 ): Promise<CityHotel[]> {
   if (!process.env.LITEAPI_KEY || !city.trim()) return [];
@@ -223,8 +234,9 @@ export async function getHotelsForCity(
 
   const rates = await getRates(hotelIds, checkInDate, checkOutDate, adults);
 
-  // Cheapest offer per hotel (min offerRetailRate.amount across its roomTypes).
-  const priced: { hotelId: string; amount: number; currency: string }[] = [];
+  // Cheapest offer per hotel (min offerRetailRate.amount across its roomTypes),
+  // carrying the star rating so we can bias the order by trip style.
+  const priced: { hotelId: string; amount: number; currency: string; stars: number }[] = [];
   for (const r of rates) {
     if (!r.hotelId || !r.roomTypes?.length) continue;
     let cheapest: { amount: number; currency: string } | null = null;
@@ -235,30 +247,37 @@ export async function getHotelsForCity(
         cheapest = { amount, currency: rt.offerRetailRate?.currency ?? DEFAULT_CURRENCY };
       }
     }
-    if (cheapest) priced.push({ hotelId: r.hotelId, ...cheapest });
+    if (cheapest) {
+      priced.push({ hotelId: r.hotelId, ...cheapest, stars: byId.get(r.hotelId)?.stars ?? 0 });
+    }
   }
 
+  // Style ordering: hotels meeting the star threshold first (cheapest-first),
+  // then the rest fill remaining slots. So luxury surfaces 4–5★, budget the
+  // cheapest overall, with a graceful fallback when a city's tier is thin.
+  const threshold = STAR_THRESHOLD_BY_STYLE[style];
+  const byAmount = (a: { amount: number }, b: { amount: number }) => a.amount - b.amount;
+  const tiered = priced.filter((p) => p.stars >= threshold).sort(byAmount);
+  const rest = priced.filter((p) => p.stars < threshold).sort(byAmount);
+  const ordered = [...tiered, ...rest].slice(0, limit);
+
   const nights = nightsBetween(checkInDate, checkOutDate);
-  // Cheapest hotels first; take the top `limit`.
-  return priced
-    .sort((a, b) => a.amount - b.amount)
-    .slice(0, limit)
-    .map(({ hotelId, amount, currency }) => {
-      const meta = byId.get(hotelId);
-      return {
-        city,
-        name: meta?.name ?? 'Hotel',
-        rating: meta?.stars ?? null,
-        reviewScore: meta?.rating ?? null,
-        currency,
-        totalAmount: Math.round(amount),
-        nights,
-        pricePerNight: Math.round(amount / nights),
-        address: meta?.address ?? null,
-        checkInDate,
-        checkOutDate,
-      };
-    });
+  return ordered.map(({ hotelId, amount, currency }) => {
+    const meta = byId.get(hotelId);
+    return {
+      city,
+      name: meta?.name ?? 'Hotel',
+      rating: meta?.stars ?? null,
+      reviewScore: meta?.rating ?? null,
+      currency,
+      totalAmount: Math.round(amount),
+      nights,
+      pricePerNight: Math.round(amount / nights),
+      address: meta?.address ?? null,
+      checkInDate,
+      checkOutDate,
+    };
+  });
 }
 
 /**
@@ -279,7 +298,7 @@ export async function getTopHotels(trip: TripData): Promise<CityHotel[]> {
     const checkInDate = addDays(trip.startDate, cumulativeNights);
     const checkOutDate = addDays(trip.startDate, cumulativeNights + nights);
     cumulativeNights += nights;
-    return getHotelsForCity(city.trim(), checkInDate, checkOutDate, adults);
+    return getHotelsForCity(city.trim(), checkInDate, checkOutDate, adults, trip.tripStyle);
   });
 
   const results = await Promise.all(tasks);
