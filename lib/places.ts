@@ -46,6 +46,10 @@ export interface Restaurant {
   priceSymbol: string | null;
   /** Rough per-person USD estimate for display, from Google's range or the tier. */
   priceEstimateUsd: number | null;
+  /** Number of diners the group estimate covers. */
+  partySize: number;
+  /** Rough total for the whole party = priceEstimateUsd × partySize. */
+  groupEstimateUsd: number | null;
   address: string | null;
 }
 
@@ -91,7 +95,7 @@ function priceFromRange(range?: PriceRange): number | null {
  * Returns null on any failure (missing key, no result, network/timeout error).
  */
 /** Map one Google place to our Restaurant shape. Returns null if it has no name. */
-function placeToRestaurant(city: string, place: PlaceResult): Restaurant | null {
+function placeToRestaurant(city: string, place: PlaceResult, partySize: number): Restaurant | null {
   if (!place?.displayName?.text) return null;
   const tier =
     place.priceLevel && place.priceLevel !== 'PRICE_LEVEL_UNSPECIFIED'
@@ -105,6 +109,9 @@ function placeToRestaurant(city: string, place: PlaceResult): Restaurant | null 
     rating: place.rating ?? null,
     priceSymbol: tier?.symbol ?? null,
     priceEstimateUsd,
+    partySize,
+    // Per-person figure × diners — a meal here for the whole party.
+    groupEstimateUsd: priceEstimateUsd != null ? priceEstimateUsd * partySize : null,
     address: place.formattedAddress ?? null,
   };
 }
@@ -114,6 +121,7 @@ export async function getRestaurantsForCity(
   city: string,
   style: TripStyle = 'mid-range',
   limit = MAX_RESTAURANTS_PER_CITY,
+  partySize = 1,
 ): Promise<Restaurant[]> {
   const apiKey = process.env.GOOGLE_PLACES_API_KEY;
   if (!apiKey || !city.trim()) return [];
@@ -139,18 +147,22 @@ export async function getRestaurantsForCity(
 
     const data = (await res.json()) as PlacesResponse;
     return (data.places ?? [])
-      .map((p) => placeToRestaurant(city, p))
+      .map((p) => placeToRestaurant(city, p, partySize))
       .filter((r): r is Restaurant => r !== null);
   } catch {
     return [];
   }
 }
 
-/** Several restaurants per city, flattened — price tier set by trip style. */
+/** Several restaurants per city, flattened — price tier set by trip style,
+ *  group estimate scaled by party size. */
 export async function getRestaurants(
   cities: string[],
   style: TripStyle = 'mid-range',
+  partySize = 1,
 ): Promise<Restaurant[]> {
-  const perCity = await Promise.all(cities.map((c) => getRestaurantsForCity(c, style)));
+  const perCity = await Promise.all(
+    cities.map((c) => getRestaurantsForCity(c, style, MAX_RESTAURANTS_PER_CITY, partySize)),
+  );
   return perCity.flat();
 }

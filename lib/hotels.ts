@@ -27,6 +27,20 @@ const GEO_RADIUS_METERS = 20000;
 // How many cheapest hotels to return per city.
 const MAX_HOTEL_RESULTS = 5;
 
+// Hotels price per ROOM, not per guest. Split the party into rooms of ~2 adults
+// so a group of 4 prices as two doubles (real hotel pricing) instead of 4 adults
+// crammed into a single room.
+const ADULTS_PER_ROOM = 2;
+
+/** Distribute `travellers` across rooms of up to ADULTS_PER_ROOM adults each. */
+function roomOccupancies(travellers: number): { adults: number }[] {
+  const guests = Math.max(1, travellers);
+  const rooms = Math.ceil(guests / ADULTS_PER_ROOM);
+  const base = Math.floor(guests / rooms);
+  const extra = guests % rooms;
+  return Array.from({ length: rooms }, (_, i) => ({ adults: base + (i < extra ? 1 : 0) }));
+}
+
 type TripStyle = TripData['tripStyle'];
 
 // Minimum star rating preferred per trip style. Hotels at/above the threshold
@@ -49,9 +63,14 @@ export interface CityHotel {
   /** Guest review score, e.g. 8.6 (LiteAPI `rating`, 0–10), or null. */
   reviewScore: number | null;
   currency: string | null;
-  /** Cheapest offer total for the whole stay. */
+  /** Number of guests this price covers. */
+  travellers: number;
+  /** Rooms booked to fit the guests (~2 adults/room). */
+  rooms: number;
+  /** Cheapest offer total for the whole stay, covering all rooms for all guests. */
   totalAmount: number | null;
   nights: number;
+  /** Total per night across all rooms (totalAmount / nights). */
   pricePerNight: number | null;
   address: string | null;
   checkInDate: string;
@@ -185,12 +204,13 @@ async function getRates(
   hotelIds: string[],
   checkin: string,
   checkout: string,
-  adults: number,
+  travellers: number,
 ): Promise<LiteRatesHotel[]> {
   try {
     const body = {
       hotelIds,
-      occupancies: [{ adults }],
+      // One occupancy entry per room — prices the whole party correctly.
+      occupancies: roomOccupancies(travellers),
       currency: DEFAULT_CURRENCY,
       guestNationality: DEFAULT_NATIONALITY,
       checkin,
@@ -262,6 +282,7 @@ export async function getHotelsForCity(
   const ordered = [...tiered, ...rest].slice(0, limit);
 
   const nights = nightsBetween(checkInDate, checkOutDate);
+  const rooms = roomOccupancies(adults).length;
   return ordered.map(({ hotelId, amount, currency }) => {
     const meta = byId.get(hotelId);
     return {
@@ -270,6 +291,8 @@ export async function getHotelsForCity(
       rating: meta?.stars ?? null,
       reviewScore: meta?.rating ?? null,
       currency,
+      travellers: adults,
+      rooms,
       totalAmount: Math.round(amount),
       nights,
       pricePerNight: Math.round(amount / nights),

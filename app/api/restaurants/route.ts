@@ -23,6 +23,7 @@ export async function OPTIONS() {
 const BodySchema = z.object({
   cities: z.array(z.string().min(1)).min(1, 'at least one city is required'),
   tripStyle: z.enum(['budget', 'mid-range', 'luxury']).optional(),
+  travellers: z.number().int().positive().optional(),
 });
 
 export async function POST(req: NextRequest) {
@@ -39,7 +40,11 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const restaurants = await getRestaurants(parsed.data.cities, parsed.data.tripStyle ?? 'mid-range');
+    const restaurants = await getRestaurants(
+      parsed.data.cities,
+      parsed.data.tripStyle ?? 'mid-range',
+      parsed.data.travellers ?? 1,
+    );
     return json({ restaurants });
   } catch (err) {
     console.error('[restaurants] failed', err);
